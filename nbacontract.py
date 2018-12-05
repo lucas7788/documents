@@ -8,11 +8,13 @@ from boa.interop.System.Action import RegisterAction
 from boa.builtins import concat, ToScriptHash, range,state
 from boa.interop.System.App import RegisterAppCall
 from boa.interop.Ontology.Native import Invoke
-from boa.interop.System.ExecutionEngine import GetExecutingScriptHash
+from boa.interop.System.ExecutionEngine import GetExecutingScriptHash,GetScriptContainer
+from boa.interop.System.Transaction import GetTransactionHash
+
 
 BetEvent = RegisterAction("placebet", "address", "gameid","horv", "amount")
 
-oracleContract = RegisterAppCall('a6ceb31d2f4694eb5dc049d518828c3c06e050ca', 'operation', 'args')
+oracleContract = RegisterAppCall('ca5744eadc5234b8d712560641ffa08d0ec63bf8', 'operation', 'args')
 ctx = GetContext()
 selfAddr = GetExecutingScriptHash()
 adminAddress = ToScriptHash("Ad4pjz2bqep4RhQrUAzMuZJkBC3qJ1tZuT")
@@ -80,8 +82,66 @@ def Main(operation, args):
         if len(args)!= 2:
             return False
         return withdraw(args[0],args[1])    
+    if operation == 'getGameCount':
+        return getGameCount(args[0])    
+    if operation == 'testOracleRes':
+        if len(args) != 1:
+            return False
+        return  testOracleRes(args[0])   
+    if operation == 'getOracleReq':
+        return getOracleReq(args[0])    
     return False    
 
+def getGameCount(date):
+    gck = _concatKey(GameCountPrefix, date)
+    return Get(ctx, gck)
+
+def getOracleReq(date):
+    gck = _concatKey(GameCountPrefix, date)
+    gameCount = Get(ctx, gck)
+
+    url = concat(concat('"http://data.nba.net/prod/v2/',date),'/scoreboard.json"')
+
+    reqtmp =  """{
+		"scheduler":{
+			"type": "runAfter",
+			"params": "2018-06-15 08:37:18"
+		},
+		"tasks":[
+			{
+			  "type": "httpGet",
+			  "params": {
+				"url":"""
+
+    reqhead = concat(concat(reqtmp,url),"""}},""")
+    bodyhead = """{"type":"jsonParse","params":{"data":[ """
+
+    tmpbody = []
+    for i in range(0,gameCount):
+        idx = _itoa(i)
+        s1 = concat(concat('{"type":"String","path":["games","', idx),'","gameId"]}')
+        s2 = concat(concat('{"type":"String","path":["games","', idx),'","hTeam","teamId"]}')
+        s3 = concat(concat('{"type":"String","path":["games","', idx),'","hTeam","score"]}')
+        s4 = concat(concat('{"type":"String","path":["games","', idx),'","vTeam","teamId"]}')
+        s5 = concat(concat('{"type":"String","path":["games","', idx),'","vTeam","score"]}')
+        tmpbody.append(_concatStrs([s1,s2,s3,s4,s5],','))
+    body = _concatStrs(tmpbody,',')
+
+    bodytail = """]}}]}"""
+    req = concat(concat(concat(reqhead,bodyhead),body),bodytail)
+
+    return req
+
+def testOracleRes(date):
+    key = _concatKey(OraclePrefix,date)
+    txhash = Get(ctx, key)
+
+    res = oracleContract('GetOracleOutcome',[txhash])
+    if not res:
+        return txhash
+    a = Deserialize(res)
+    b = Deserialize(a[0])
+    return _concatStrs([b[0],b[1],b[2],b[3],b[4]],',')
 
 def name():
     return Name
@@ -200,42 +260,13 @@ def inputMatch( date, gameID, hTeamID, vTeamID):
 def callOracle(date):
     _require(CheckWitness(operaterAddress) or CheckWitness(adminAddress))
 
-    gck = _concatKey(GameCountPrefix, date)
-    gameCount = Get(ctx, gck)
-
-    url = concat(concat('"http://data.nba.net/prod/v2/"',date),'/scoreboard.json"')
-
-    reqtmp =  """{
-		"scheduler":{
-			"type": "runAfter",
-			"params": "2018-06-15 08:37:18"
-		},
-		"tasks":[
-			{
-			  "type": "httpGet",
-			  "params": {
-				"url":"""
-
-    reqhead = concat(concat(reqtmp,url),"""}},""")
-    bodyhead = """{"type":"jsonParse","params":{"data":[ """
-
-    tmpbody = []
-    for i in range(0,gameCount):
-        s1 = concat(concat("""{"type":"String","path":["games",""", concat(concat('"',i),'"')),""","gameId"]}""")
-        s2 = concat(concat("""{"type":"String","path":["games",""", concat(concat('"',i),'"')),""","hTeam","teamId]}""")
-        s3 = concat(concat("""{"type":"String","path":["games",""", concat(concat('"',i),'"')),""","hTeam","score]}""")
-        s4 = concat(concat("""{"type":"String","path":["games",""", concat(concat('"',i),'"')),""","vTeam","teamId]}""")
-        s5 = concat(concat("""{"type":"String","path":["games",""", concat(concat('"',i),'"')),""","vTeam","score]}""")
-        tmpbody.append(_concatStrs([s1,s2,s3,s4,s5],','))
-    body = _concatStrs(tmpbody,',')
-
-    bodytail = """]}}]}"""
-    req = concat(concat(concat(reqhead,bodyhead),body),bodytail)
+    req = getOracleReq(date)
 
     key = _concatKey(OraclePrefix,date)
-    txhash = GetExecutingScriptHash()
+    txhash = GetTransactionHash(GetScriptContainer())
     Put(ctx, key, txhash)
-    oracleContract('CreateOracleRequest',[req,txhash])
+    oracleContract('CreateOracleRequest',[req,selfAddr])
+    Notify([txhash])
     return True
 
 def setResult(date):
@@ -299,7 +330,7 @@ def setResult(date):
         
         totalBets = betmap['HomeTotal'] + betmap['VisitorTotal']
         _distributeRewards(totalBets, winnerBets,betinfos)
-
+    Put(ctx, OracleResPrefix,True)
     return True
 
 
@@ -421,3 +452,9 @@ def _distributeRewards(totalBets,winnerBets,betinfos):
         balance = Get(ctx,FeePoolPrefix)
         Put(ctx,FeePoolPrefix,balance + totalBets - count)
     return True
+
+def _itoa(i):
+    if i < 10:
+        return i+48
+    else:
+        return concat(_itoa(i/10),_itoa(i%10))
